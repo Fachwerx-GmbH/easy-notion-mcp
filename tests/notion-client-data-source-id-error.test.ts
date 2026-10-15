@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { getCachedSchema } from "../src/notion-client.js";
+import { getCachedSchema, queryDatabase } from "../src/notion-client.js";
 
 type MockClient = {
   dataSources: {
@@ -17,7 +17,7 @@ function objectNotFoundError(message = "Could not find database") {
   return error;
 }
 
-describe("getCachedSchema data source ID errors", () => {
+describe("data source IDs", () => {
   it("getCachedSchema resolves normally for a database container ID", async () => {
     const schema = { id: "ds-happy", properties: { Name: { type: "title" } } };
     const client: MockClient = {
@@ -36,34 +36,34 @@ describe("getCachedSchema data source ID errors", () => {
     expect(client.dataSources.retrieve).not.toHaveBeenCalledWith({ data_source_id: "db-happy" });
   });
 
-  it("getCachedSchema rejects a data_source ID with layer-mismatch guidance and parent database ID", async () => {
+  it("getCachedSchema accepts a data_source ID, the ID search returns for databases", async () => {
+    const dataSource = {
+      object: "data_source",
+      id: "ds-direct",
+      parent: { type: "database_id", database_id: "db-parent" },
+      properties: { Name: { type: "title" } },
+    };
     const client: MockClient = {
-      databases: {
-        retrieve: vi.fn().mockRejectedValue(objectNotFoundError()),
-      },
+      databases: { retrieve: vi.fn().mockRejectedValue(objectNotFoundError()) },
+      dataSources: { retrieve: vi.fn().mockResolvedValue(dataSource) },
+    };
+
+    await expect(getCachedSchema(client as any, "ds-direct")).resolves.toBe(dataSource);
+    await expect(getCachedSchema(client as any, "ds-direct")).resolves.toBe(dataSource);
+    expect(client.databases.retrieve).toHaveBeenCalledTimes(1);
+  });
+
+  it("queryDatabase queries a data_source ID directly", async () => {
+    const client = {
+      databases: { retrieve: vi.fn().mockRejectedValue(objectNotFoundError()) },
       dataSources: {
-        retrieve: vi.fn().mockResolvedValue({
-          object: "data_source",
-          id: "ds-wrong",
-          parent: { type: "database_id", database_id: "db-parent" },
-          properties: {},
-        }),
+        retrieve: vi.fn().mockResolvedValue({ object: "data_source", id: "ds-query", properties: {} }),
+        query: vi.fn().mockResolvedValue({ results: [{ id: "row-1" }], has_more: false, next_cursor: null }),
       },
     };
 
-    let thrown: unknown;
-    try {
-      await getCachedSchema(client as any, "ds-wrong");
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toBeInstanceOf(Error);
-    const message = (thrown as Error).message;
-    expect(message).toContain("data_source");
-    expect(message).toContain("list_databases");
-    expect(message).toContain("db-parent");
-    expect(message).not.toContain("Make sure the page/database is shared with your Notion integration");
+    await expect(queryDatabase(client as any, "ds-query")).resolves.toEqual([{ id: "row-1" }]);
+    expect(client.dataSources.query).toHaveBeenCalledWith(expect.objectContaining({ data_source_id: "ds-query" }));
   });
 
   it("getCachedSchema preserves original object_not_found when neither database nor data source exists", async () => {
@@ -82,35 +82,5 @@ describe("getCachedSchema data source ID errors", () => {
 
     await expect(getCachedSchema(client as any, "db-missing-specific")).rejects.toBe(original);
     expect(client.dataSources.retrieve).toHaveBeenCalledWith({ data_source_id: "db-missing-specific" });
-  });
-
-  it("getCachedSchema does not cache layer-mismatch failures and allows a later successful resolution", async () => {
-    const schema = { id: "ds-cache-good", properties: { Name: { type: "title" } } };
-    const client: MockClient = {
-      databases: {
-        retrieve: vi
-          .fn()
-          .mockRejectedValueOnce(objectNotFoundError())
-          .mockResolvedValueOnce({ id: "db-cache-parent", data_sources: [{ id: "ds-cache-good" }] }),
-      },
-      dataSources: {
-        retrieve: vi
-          .fn()
-          .mockResolvedValueOnce({
-            object: "data_source",
-            id: "ds-cache-mismatch",
-            parent: { type: "database_id", database_id: "db-cache-parent" },
-            properties: {},
-          })
-          .mockResolvedValueOnce(schema),
-      },
-    };
-
-    await expect(getCachedSchema(client as any, "ds-cache-mismatch")).rejects.toThrow(/data_source/);
-    await expect(getCachedSchema(client as any, "db-cache-parent")).resolves.toBe(schema);
-
-    expect(client.dataSources.retrieve).toHaveBeenCalledTimes(2);
-    expect(client.dataSources.retrieve).toHaveBeenNthCalledWith(1, { data_source_id: "ds-cache-mismatch" });
-    expect(client.dataSources.retrieve).toHaveBeenNthCalledWith(2, { data_source_id: "ds-cache-good" });
   });
 });
