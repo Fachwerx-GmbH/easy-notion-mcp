@@ -127,6 +127,9 @@ export async function createApp(options: CreateAppOptions = {}): Promise<express
         res.status(401).json({ error: "No Notion token available" });
         return;
       }
+      console.error(
+        `mcp ${req.method} ${req.body?.method ?? "-"} protocol=${req.headers["mcp-protocol-version"] ?? "none"} ua=${req.headers["user-agent"] ?? "-"}`,
+      );
       // express.json() already drained the stream, so the parsed body goes along.
       await handle(req, res, req.body);
     };
