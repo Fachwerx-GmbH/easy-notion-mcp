@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import express from "express";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createNotionClient } from "./notion-client.js";
 import { createServer } from "./server.js";
 import { isMainModule } from "./main-module.js";
-import { randomUUID, timingSafeEqual } from "crypto";
+import { timingSafeEqual } from "crypto";
+import type { Kv } from "./auth/kv.js";
 
 const PORT = parseInt(process.env.PORT ?? "3333", 10);
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const NOTION_OAUTH_CLIENT_ID = process.env.NOTION_OAUTH_CLIENT_ID;
 const NOTION_OAUTH_CLIENT_SECRET = process.env.NOTION_OAUTH_CLIENT_SECRET;
-const OAUTH_REDIRECT_URI =
-  process.env.OAUTH_REDIRECT_URI ?? `http://localhost:${PORT}/callback`;
 
 const oauthEnabled = !!(NOTION_OAUTH_CLIENT_ID && NOTION_OAUTH_CLIENT_SECRET);
 
@@ -36,6 +36,12 @@ export interface CreateAppOptions {
    * Not used in OAuth mode (OAuth issues its own bearers).
    */
   bearer?: string;
+  /** Public origin of this server: OAuth issuer and base of /callback. Defaults to http://localhost:$PORT. */
+  publicUrl?: string;
+  /** OAuth state store. Defaults to Redis from the environment, else memory. */
+  kv?: Kv;
+  /** Tool names hidden from clients, e.g. destructive tools for unattended agents. */
+  disabledTools?: string[];
 }
 
 /**
@@ -88,6 +94,10 @@ function bearerAuthMiddleware(expectedBearer: string): express.RequestHandler {
 /**
  * Create the Express app with MCP endpoints.
  * Exported so integration tests can use it without starting a real server.
+ *
+ * Stateless: every /mcp request builds its own server instance, so any
+ * instance behind a load balancer can answer it. createMcpHandler serves the
+ * 2026-07-28 protocol and falls back to stateless 2025-era serving.
  */
 export async function createApp(options: CreateAppOptions = {}): Promise<express.Express> {
   const useOAuth = !!(options.oauthClientId && options.oauthClientSecret);
@@ -99,87 +109,28 @@ export async function createApp(options: CreateAppOptions = {}): Promise<express
   const app = express();
   app.use(express.json());
 
-  const transports = new Map<string, StreamableHTTPServerTransport>();
-
-  /**
-   * Create a session handler for the POST /mcp endpoint.
-   * The `getNotionToken` function extracts the Notion token from the request.
-   */
-  function createSessionHandler(
-    getNotionToken: (req: express.Request) => string | undefined,
-    allowWorkspaceParent: boolean = false,
-  ) {
-    return async (req: express.Request, res: express.Response) => {
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      let transport = sessionId ? transports.get(sessionId) : undefined;
-
-      if (!transport) {
-        transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-          onsessioninitialized: (id) => {
-            transports.set(id, transport!);
-            console.error(`Session started: ${id}`);
-          },
-          onsessionclosed: (id) => {
-            transports.delete(id);
-            console.error(`Session closed: ${id}`);
-          },
-        });
-
-        transport.onclose = () => {
-          const id = transport!.sessionId;
-          if (id) {
-            transports.delete(id);
-            console.error(`Transport closed, session removed: ${id}`);
-          }
-        };
-
-        const notionToken = getNotionToken(req);
-        if (!notionToken) {
-          res.status(401).json({ error: "No Notion token available" });
-          return;
-        }
-
-        const notion = createNotionClient(notionToken);
-        const server = createServer(() => notion, {
+  const mcpHandler = (notionTokenFor: (auth?: AuthInfo) => string | undefined, allowWorkspaceParent: boolean) => {
+    const handle = toNodeHandler(
+      createMcpHandler(({ authInfo }) => {
+        const notion = createNotionClient(notionTokenFor(authInfo)!);
+        return createServer(() => notion, {
           rootPageId: options.rootPageId,
           trustContent: options.trustContent ?? false,
           allowWorkspaceParent,
           transport: "http",
+          disabledTools: options.disabledTools,
         });
-
-        await server.connect(transport);
-      }
-
-      await transport.handleRequest(req, res, req.body);
-    };
-  }
-
-  function createGetHandler() {
+      }),
+    );
     return async (req: express.Request, res: express.Response) => {
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      const transport = sessionId ? transports.get(sessionId) : undefined;
-      if (!transport) {
-        res.status(400).json({ error: "No active session" });
+      if (!notionTokenFor(req.auth)) {
+        res.status(401).json({ error: "No Notion token available" });
         return;
       }
-      await transport.handleRequest(req, res);
+      // express.json() already drained the stream, so the parsed body goes along.
+      await handle(req, res, req.body);
     };
-  }
-
-  function createDeleteHandler() {
-    return async (req: express.Request, res: express.Response) => {
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      const transport = sessionId ? transports.get(sessionId) : undefined;
-      if (!transport) {
-        res.status(400).json({ error: "No active session" });
-        return;
-      }
-      await transport.handleRequest(req, res);
-      transports.delete(sessionId!);
-      console.error(`Session closed: ${sessionId}`);
-    };
-  }
+  };
 
   // Health check — helps verify the HTTP server is running and reachable
   app.get("/", (_req: express.Request, res: express.Response) => {
@@ -193,77 +144,54 @@ export async function createApp(options: CreateAppOptions = {}): Promise<express
 
   if (useOAuth) {
     // Dynamic imports to avoid loading auth modules when not needed
-    const { mcpAuthRouter } = await import(
-      "@modelcontextprotocol/sdk/server/auth/router.js"
-    );
-    const { requireBearerAuth } = await import(
-      "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js"
-    );
+    const { requireBearerAuth, getOAuthProtectedResourceMetadataUrl } = await import("@modelcontextprotocol/express");
     const { NotionOAuthProvider } = await import("./auth/oauth-provider.js");
-    const { TokenStore } = await import("./auth/token-store.js");
+    const { oauthRouter } = await import("./auth/router.js");
+    const { redisKvFromEnv, sealedKv, encryptionKeyFromEnv, memoryKv } = await import("./auth/kv.js");
 
-    const tokenStore = new TokenStore();
-    await tokenStore.init();
+    const publicUrl = new URL(options.publicUrl ?? `http://localhost:${process.env.PORT ?? "3333"}`);
+    const redis = options.kv ? undefined : redisKvFromEnv(process.env);
+    const kv = sealedKv(options.kv ?? redis ?? memoryKv(), encryptionKeyFromEnv(process.env, !!redis));
 
-    const oauthProvider = new NotionOAuthProvider(tokenStore, {
+    const oauthProvider = new NotionOAuthProvider(kv, {
       clientId: options.oauthClientId!,
       clientSecret: options.oauthClientSecret!,
-      redirectUri: options.oauthRedirectUri ?? `http://localhost:3333/callback`,
+      redirectUri: options.oauthRedirectUri ?? new URL("/callback", publicUrl).href,
     });
 
-    // Clean up expired sessions every 5 minutes
-    const cleanupInterval = setInterval(() => oauthProvider.cleanup(), 5 * 60 * 1000);
-    // Allow the process to exit without waiting for the interval
-    cleanupInterval.unref();
+    app.use(oauthRouter(oauthProvider, publicUrl));
 
-    const port = parseInt(process.env.PORT ?? "3333", 10);
-    const issuerUrl = new URL(`http://localhost:${port}`);
-
-    // Mount OAuth AS endpoints (/.well-known/*, /authorize, /token, /register)
-    app.use(
-      mcpAuthRouter({
-        provider: oauthProvider,
-        issuerUrl,
-        serviceDocumentationUrl: new URL(
-          "https://github.com/jwigg/easy-notion-mcp",
-        ),
-      }),
-    );
-
-    // Notion OAuth callback (NOT part of mcpAuthRouter)
-    app.get("/callback", async (req, res) => {
-      await oauthProvider.handleNotionCallback(req, res);
-    });
-
-    // Bearer auth middleware for MCP endpoints
     const authMiddleware = requireBearerAuth({
       verifier: oauthProvider,
+      resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(new URL("/mcp", publicUrl)),
     });
-
-    const getNotionTokenFromAuth = (req: express.Request): string | undefined => {
-      const authInfo = (req as any).auth as { extra?: Record<string, unknown> };
-      return authInfo?.extra?.notionToken as string | undefined;
-    };
-
-    app.post("/mcp", authMiddleware, createSessionHandler(getNotionTokenFromAuth, true));
-    app.get("/mcp", authMiddleware, createGetHandler());
-    app.delete("/mcp", authMiddleware, createDeleteHandler());
+    app.all("/mcp", authMiddleware, mcpHandler((auth) => auth?.extra?.notionToken as string | undefined, true));
 
     console.error("OAuth mode enabled");
   } else {
     // Static token mode
     const staticToken = options.notionToken;
-    const getStaticToken = () => staticToken;
-    const authMiddleware = bearerAuthMiddleware(options.bearer!);
-
-    app.post("/mcp", authMiddleware, createSessionHandler(getStaticToken, false));
-    app.get("/mcp", authMiddleware, createGetHandler());
-    app.delete("/mcp", authMiddleware, createDeleteHandler());
+    app.all("/mcp", bearerAuthMiddleware(options.bearer!), mcpHandler(() => staticToken, false));
 
     console.error("Static token mode (NOTION_TOKEN + NOTION_MCP_BEARER)");
   }
 
   return app;
+}
+
+/** The app as configured by the environment. Also the Vercel entry point. */
+export function createAppFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<express.Express> {
+  return createApp({
+    notionToken: env.NOTION_TOKEN,
+    oauthClientId: env.NOTION_OAUTH_CLIENT_ID,
+    oauthClientSecret: env.NOTION_OAUTH_CLIENT_SECRET,
+    oauthRedirectUri: env.OAUTH_REDIRECT_URI,
+    publicUrl: env.PUBLIC_URL,
+    rootPageId: env.NOTION_ROOT_PAGE_ID,
+    trustContent: env.NOTION_TRUST_CONTENT === "true",
+    bearer: env.NOTION_MCP_BEARER,
+    disabledTools: env.NOTION_MCP_DISABLED_TOOLS?.split(",").map((name) => name.trim()).filter(Boolean),
+  });
 }
 
 async function startServer() {
@@ -275,16 +203,7 @@ async function startServer() {
   }
 
   const bindHost = getBindHost(process.env);
-
-  const app = await createApp({
-    notionToken: NOTION_TOKEN,
-    oauthClientId: NOTION_OAUTH_CLIENT_ID,
-    oauthClientSecret: NOTION_OAUTH_CLIENT_SECRET,
-    oauthRedirectUri: OAUTH_REDIRECT_URI,
-    rootPageId: process.env.NOTION_ROOT_PAGE_ID,
-    trustContent: process.env.NOTION_TRUST_CONTENT === "true",
-    bearer: process.env.NOTION_MCP_BEARER,
-  });
+  const app = await createAppFromEnv();
 
   app.listen(PORT, bindHost, () => {
     console.error(`easy-notion-mcp HTTP server listening on ${bindHost}:${PORT}`);

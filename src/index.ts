@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import "dotenv/config";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { createNotionClient } from "./notion-client.js";
 import { createServer } from "./server.js";
 
