@@ -1533,7 +1533,7 @@ export function enhanceError(error: unknown, toolName: string, args: Record<stri
   }
 
   if (code === "restricted_resource") {
-    return "This page hasn't been shared with the integration. In Notion, open the page \u2192 \u00b7\u00b7\u00b7 menu \u2192 Connections \u2192 add your integration.";
+    return `${message} Either the page is not shared with the integration (in Notion: page \u2192 \u00b7\u00b7\u00b7 menu \u2192 Connections \u2192 add it), or the integration lacks the capability this call needs, such as reading comments or user information (Notion integration settings \u2192 Capabilities).`;
   }
 
   if (code === "validation_error" && /propert/i.test(message)) {
