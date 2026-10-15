@@ -33,7 +33,10 @@ async function run(mode: "legacy" | { pin: string }) {
     const items = JSON.parse(found) as Array<{ id: string; type?: string; object?: string }>;
     const list = Array.isArray(items) ? items : ((items as { results?: typeof items }).results ?? []);
     pageId ??= list.find((i) => (i.type ?? i.object) === "page")?.id;
-    databaseId ??= list.find((i) => /database|data_source/.test(i.type ?? i.object ?? ""))?.id;
+  }
+  if (!databaseId) {
+    const dbs = JSON.parse(text(await client.callTool({ name: "list_databases", arguments: {} })));
+    databaseId = (Array.isArray(dbs) ? dbs : (dbs.results ?? dbs.databases ?? []))[0]?.id;
   }
   if (pageId) {
     const page = text(await client.callTool({ name: "read_page", arguments: { page_id: pageId, max_blocks: 3 } }));
@@ -41,7 +44,8 @@ async function run(mode: "legacy" | { pin: string }) {
   }
   if (databaseId) {
     const rows = JSON.parse(text(await client.callTool({ name: "query_database", arguments: { database_id: databaseId } })));
-    console.log(`[${label}] query_database ${databaseId}: ${(rows.results ?? rows).length} rows`);
+    const count = Array.isArray(rows) ? rows.length : rows.results?.length;
+    console.log(`[${label}] query_database ${databaseId}: ${count ?? JSON.stringify(rows).slice(0, 200)} rows`);
   }
   await client.close();
 }
