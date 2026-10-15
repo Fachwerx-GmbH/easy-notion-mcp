@@ -28,4 +28,13 @@ describe("enhanceError", () => {
 
     expect(message).not.toContain("get_database");
   });
+
+  it("keeps Notion's message on restricted_resource and names both causes", () => {
+    const error = new Error("Insufficient permissions for this endpoint.") as Error & { body: { code: string } };
+    error.body = { code: "restricted_resource" };
+    const message = enhanceError(error, "list_comments", {});
+    expect(message).toContain("Insufficient permissions for this endpoint.");
+    expect(message).toMatch(/capabilit/i);
+    expect(message).toMatch(/Connections/);
+  });
 });

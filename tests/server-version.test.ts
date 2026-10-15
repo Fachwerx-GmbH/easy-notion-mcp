@@ -1,5 +1,5 @@
-import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client as McpClient } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
 

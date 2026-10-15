@@ -568,17 +568,15 @@ async function getDataSourceId(client: Client, dbId: string): Promise<string> {
     if (!isObjectNotFoundError(error)) {
       throw error;
     }
-    const originalError = error;
-    let probe: any;
+    // search returns databases as data sources, so agents pass data_source IDs;
+    // one already names the data source every caller of this function needs.
     try {
-      probe = await client.dataSources.retrieve({ data_source_id: dbId });
+      const dataSource: any = await client.dataSources.retrieve({ data_source_id: dbId });
+      dataSourceIdCache.set(dbId, { dsId: dataSource.id, expires: Date.now() + SCHEMA_CACHE_TTL });
+      return dataSource.id;
     } catch {
-      throw originalError;
+      throw error;
     }
-    const parentId = (probe as any).parent?.database_id;
-    throw new Error(
-      `ID ${dbId} is a data_source ID, not a database container ID. Pass the parent database ID${parentId ? ` (${parentId})` : ""}; use list_databases to find database container IDs.`,
-    );
   }
   const dsId = db.data_sources?.[0]?.id;
   if (!dsId) {

@@ -89,8 +89,8 @@ describe("HTTP Transport — Static Token Mode", () => {
     expect(body.result.serverInfo.name).toBe("easy-notion-mcp");
     expect(body.result.protocolVersion).toBe("2025-03-26");
 
-    const sessionId = res.headers["mcp-session-id"];
-    expect(sessionId).toBeDefined();
+    // Stateless: no session is issued and later requests carry none.
+    expect(res.headers["mcp-session-id"]).toBeUndefined();
 
     const initializedNotification = {
       jsonrpc: "2.0",
@@ -102,7 +102,6 @@ describe("HTTP Transport — Static Token Mode", () => {
       .set("Content-Type", "application/json")
       .set("Accept", "application/json, text/event-stream")
       .set("Authorization", AUTH_HEADER)
-      .set("mcp-session-id", sessionId)
       .send(initializedNotification);
 
     const listToolsRequest = {
@@ -117,7 +116,6 @@ describe("HTTP Transport — Static Token Mode", () => {
       .set("Content-Type", "application/json")
       .set("Accept", "application/json, text/event-stream")
       .set("Authorization", AUTH_HEADER)
-      .set("mcp-session-id", sessionId)
       .send(listToolsRequest);
 
     expect(toolsRes.status).toBe(200);
@@ -149,16 +147,14 @@ describe("HTTP Transport — Static Token Mode", () => {
     expect(toolNames).not.toContain("create_page_from_file");
   });
 
-  it("returns 400 for authed GET /mcp without a session", async () => {
+  it("answers authed GET /mcp with 405: stateless serving has no session stream", async () => {
     const res = await request(app).get("/mcp").set("Authorization", AUTH_HEADER);
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe("No active session");
+    expect(res.status).toBe(405);
   });
 
-  it("returns 400 for authed DELETE /mcp without a session", async () => {
+  it("answers authed DELETE /mcp with 405: stateless serving has no session to end", async () => {
     const res = await request(app).delete("/mcp").set("Authorization", AUTH_HEADER);
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe("No active session");
+    expect(res.status).toBe(405);
   });
 
   it("rejects POST /mcp when no static Notion token is configured", async () => {

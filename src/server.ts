@@ -2,13 +2,7 @@ import { createRequire } from "node:module";
 import { realpath } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import type { Client } from "@notionhq/client";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  CallToolRequestSchema,
-  ListResourcesRequestSchema,
-  ListToolsRequestSchema,
-  ReadResourceRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, type Tool } from "@modelcontextprotocol/server";
 
 const { version: PACKAGE_VERSION } = createRequire(import.meta.url)("../package.json") as { version: string };
 import { blocksToMarkdown } from "./blocks-to-markdown.js";
@@ -1539,7 +1533,7 @@ export function enhanceError(error: unknown, toolName: string, args: Record<stri
   }
 
   if (code === "restricted_resource") {
-    return "This page hasn't been shared with the integration. In Notion, open the page \u2192 \u00b7\u00b7\u00b7 menu \u2192 Connections \u2192 add your integration.";
+    return `${message} Either the page is not shared with the integration (in Notion: page \u2192 \u00b7\u00b7\u00b7 menu \u2192 Connections \u2192 add it), or the integration lacks the capability this call needs, such as reading comments or user information (Notion integration settings \u2192 Capabilities).`;
   }
 
   if (code === "validation_error" && /propert/i.test(message)) {
@@ -1556,7 +1550,7 @@ export function enhanceError(error: unknown, toolName: string, args: Record<stri
 type ToolDefinition = {
   name: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  inputSchema: Tool["inputSchema"];
   transports?: readonly [ServerTransport, ...ServerTransport[]];
 };
 
@@ -2362,6 +2356,8 @@ export interface CreateServerConfig {
   transport?: ServerTransport;
   workspaceRoot?: string;
   workspaceRootSource?: WorkspaceRootSource;
+  /** Tool names hidden from tools/list and refused by tools/call. */
+  disabledTools?: readonly string[];
 }
 
 export function createServer(
@@ -2375,6 +2371,7 @@ export function createServer(
     transport = "stdio",
     workspaceRoot,
     workspaceRootSource,
+    disabledTools = [],
   } = config;
   let stickyParentPageId: string | undefined;
 
@@ -2418,10 +2415,12 @@ export function createServer(
   // can never update one and leave the other reporting a stale count.
   const visibleTools = (): readonly ToolDefinition[] =>
     (tools as readonly ToolDefinition[]).filter(
-      (tool) => !tool.transports || tool.transports.includes(transport),
+      (tool) =>
+        (!tool.transports || tool.transports.includes(transport)) &&
+        !disabledTools.includes(tool.name),
     );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  server.setRequestHandler("tools/list", async () => {
     const visible = visibleTools()
       .map(({ name, description, inputSchema }) => ({
         name,
@@ -2431,7 +2430,7 @@ export function createServer(
     return { tools: visible };
   });
 
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  server.setRequestHandler("resources/list", async () => ({
     resources: resources.map(({ uri, name, title, description, mimeType, text }) => ({
       uri,
       name,
@@ -2442,13 +2441,16 @@ export function createServer(
     })),
   }));
 
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) =>
+  server.setRequestHandler("resources/read", async (request) =>
     readResourceContents(request.params.uri)
   );
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler("tools/call", async (request) => {
     const { name, arguments: args = {} } = request.params;
 
+    if (disabledTools.includes(name)) {
+      return textResponse({ error: `Tool '${name}' is disabled on this server.` });
+    }
     const toolDef = (tools as readonly ToolDefinition[]).find((tool) => tool.name === name);
     if (toolDef?.transports && !toolDef.transports.includes(transport)) {
       return textResponse({
