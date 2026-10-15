@@ -53,3 +53,4 @@ openclaw-notion-research.md
 .meta/probes/
 
 .vercel
+.env*
